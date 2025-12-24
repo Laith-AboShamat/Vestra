@@ -20,7 +20,6 @@ import ShoppingCartIcon from '@mui/icons-material/ShoppingCart';
 import DesignCanvas from '../../components/design/ThreeDesignCanvas.jsx';
 import CheckroomIcon from '@mui/icons-material/Checkroom';
 import DryCleaningIcon from '@mui/icons-material/DryCleaning';
-import SportsBasketballIcon from '@mui/icons-material/SportsBasketball';
 import { TextField } from '@mui/material';
 
 const drawerWidth = 260;
@@ -33,7 +32,7 @@ function DesignStudio() {
   const isMdUp = useMediaQuery('(min-width:900px)');
   const uploadInputRef = useRef(null);
 
-  const handleAddText = () => canvasApi?.addText();
+  const handleAddText = () => canvasApi?.addText('Text');
   const handleSave = () => {
     const json = canvasApi?.exportJson?.();
     if (!json) return;
@@ -164,31 +163,6 @@ function DesignStudio() {
           <Typography variant="caption" sx={{ fontWeight: 700 }}>Hoodie</Typography>
         </Box>
 
-        <Box
-          draggable
-          onDragStart={(e) => {
-            e.dataTransfer.effectAllowed = 'copyMove';
-            e.dataTransfer.setData('text/plain', 'jacket');
-            handleAddGarment('jacket');
-            canvasApi?.setGarmentColor?.(garmentColor);
-          }}
-          sx={{
-            width: 76,
-            height: 76,
-            borderRadius: 2,
-            border: '1px dashed #cfd8dc',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 0.5,
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'grab',
-            backgroundColor: '#f7f9fb'
-          }}
-        >
-          <SportsBasketballIcon color="primary" sx={{ fontSize: 30 }} />
-          <Typography variant="caption" sx={{ fontWeight: 700 }}>Jacket</Typography>
-        </Box>
       </Stack>
     </Box>
   );

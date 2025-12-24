@@ -8,7 +8,7 @@ function clamp(num, min, max) {
   return Math.min(max, Math.max(min, num));
 }
 
-export default function GarmentModel({ modelPath, color, onStatus }) {
+export default function GarmentModel({ modelPath, color, onStatus, onMeshReady, onMeshesReady }) {
   const root = useRef();
   const { camera, size } = useThree();
 
@@ -31,11 +31,17 @@ export default function GarmentModel({ modelPath, color, onStatus }) {
     const aspect = size.height > 0 ? size.width / size.height : 1;
     const visibleWidth = visibleHeight * aspect;
 
+    // Guard against broken/near-zero bounds (can happen with some exports),
+    // which would otherwise cause a huge scale and a "zoomed/cropped" view.
+    const bx = Math.max(0.25, Number(bounds?.x) || 0);
+    const by = Math.max(0.25, Number(bounds?.y) || 0);
+
     // Leave some margin.
     const margin = 0.78;
-    const sx = bounds.x > 0 ? (visibleWidth * margin) / bounds.x : 1;
-    const sy = bounds.y > 0 ? (visibleHeight * margin) / bounds.y : 1;
-    return clamp(Math.min(sx, sy), 0.01, 100);
+    const sx = (visibleWidth * margin) / bx;
+    const sy = (visibleHeight * margin) / by;
+    // Keep scale within a sensible range to avoid extreme zoom for oddly-authored assets.
+    return clamp(Math.min(sx, sy), 0.01, 25);
   };
 
   useEffect(() => {
@@ -47,11 +53,115 @@ export default function GarmentModel({ modelPath, color, onStatus }) {
 
     loader.load(
       modelPath,
-      (gltf) => {
+      async (gltf) => {
         if (!mounted) return;
 
         const scene = gltf.scene || gltf.scenes?.[0];
         const coloredMaterials = [];
+
+        // Best-effort support for deprecated spec/gloss materials.
+        // Some assets still export KHR_materials_pbrSpecularGlossiness. Newer Three versions
+        // may warn "Unknown extension" and ignore its texture slots, making the model look wrong.
+        const tryApplySpecGloss = async () => {
+          const parser = gltf?.parser;
+          const json = parser?.json;
+          const materials = json?.materials;
+          const associations = parser?.associations;
+          if (!parser || !materials || !associations) return;
+
+          const jobs = [];
+          scene?.traverse((child) => {
+            if (!child?.isMesh) return;
+            const mat = child.material;
+            const assoc = mat ? associations.get(mat) : null;
+            const materialIndex = assoc?.materials ?? assoc?.material ?? null;
+            if (materialIndex == null) return;
+            const matDef = materials[materialIndex];
+            const ext = matDef?.extensions?.KHR_materials_pbrSpecularGlossiness;
+            if (!ext) return;
+
+            // Ensure we have a Standard/Physical material to apply textures to.
+            if (!child.material?.isMeshStandardMaterial && !child.material?.isMeshPhysicalMaterial) {
+              const next = new THREE.MeshStandardMaterial();
+              if (child.material?.color) next.color.copy(child.material.color);
+              if (child.material?.map) next.map = child.material.map;
+              if (child.material?.transparent) next.transparent = child.material.transparent;
+              if (typeof child.material?.opacity === 'number') next.opacity = child.material.opacity;
+              child.material?.dispose?.();
+              child.material = next;
+            }
+
+            const targetMat = child.material;
+
+            if (Array.isArray(ext.diffuseFactor) && ext.diffuseFactor.length >= 3) {
+              targetMat.color = targetMat.color || new THREE.Color();
+              targetMat.color.setRGB(ext.diffuseFactor[0], ext.diffuseFactor[1], ext.diffuseFactor[2]);
+              if (typeof ext.diffuseFactor[3] === 'number') {
+                targetMat.opacity = ext.diffuseFactor[3];
+                targetMat.transparent = ext.diffuseFactor[3] < 1;
+              }
+            }
+
+            if (typeof ext.glossinessFactor === 'number') {
+              targetMat.metalness = 0;
+              targetMat.roughness = clamp(1 - ext.glossinessFactor, 0, 1);
+            }
+
+            if (ext.diffuseTexture?.index != null) {
+              jobs.push(
+                parser.getDependency('texture', ext.diffuseTexture.index).then((tex) => {
+                  targetMat.map = tex;
+                  targetMat.needsUpdate = true;
+                })
+              );
+            }
+
+            // We can't perfectly translate specGloss textures to Standard PBR, but using the
+            // specGloss texture as a roughness map usually looks better than ignoring it.
+            if (ext.specularGlossinessTexture?.index != null) {
+              jobs.push(
+                parser.getDependency('texture', ext.specularGlossinessTexture.index).then((tex) => {
+                  targetMat.roughnessMap = tex;
+                  targetMat.needsUpdate = true;
+                })
+              );
+            }
+          });
+
+          if (jobs.length > 0) {
+            try {
+              await Promise.all(jobs);
+            } catch {
+              // ignore
+            }
+          }
+        };
+
+        await tryApplySpecGloss();
+
+        // Pick a "primary" mesh (largest bounds volume) for decal projection,
+        // and also collect all meshes so decals can be placed on any side.
+        let primaryMesh = null;
+        let primaryVolume = -Infinity;
+        const allMeshes = [];
+        try {
+          scene?.updateMatrixWorld?.(true);
+          const box = new THREE.Box3();
+          scene?.traverse((child) => {
+            if (!child?.isMesh) return;
+            allMeshes.push(child);
+            box.setFromObject(child);
+            const size = new THREE.Vector3();
+            box.getSize(size);
+            const vol = Math.max(0, size.x) * Math.max(0, size.y) * Math.max(0, size.z);
+            if (Number.isFinite(vol) && vol > primaryVolume) {
+              primaryVolume = vol;
+              primaryMesh = child;
+            }
+          });
+        } catch {
+          // ignore
+        }
 
         scene?.traverse((child) => {
           if (!child.isMesh) return;
@@ -92,6 +202,11 @@ export default function GarmentModel({ modelPath, color, onStatus }) {
         setModel(scene);
         setLoadState('loaded');
         onStatus?.({ state: 'loaded', path: modelPath });
+
+        // Notify after model is set so refs are stable.
+        // Note: this is best-effort; some assets may have no meshes.
+        if (typeof onMeshReady === 'function') onMeshReady(primaryMesh);
+        if (typeof onMeshesReady === 'function') onMeshesReady(allMeshes);
       },
       undefined,
       (err) => {
@@ -100,6 +215,9 @@ export default function GarmentModel({ modelPath, color, onStatus }) {
         setLoadState('failed');
         materialsRef.current = [fallbackMaterial];
         onStatus?.({ state: 'failed', path: modelPath, error: err });
+
+        if (typeof onMeshReady === 'function') onMeshReady(null);
+        if (typeof onMeshesReady === 'function') onMeshesReady([]);
       }
     );
 
